@@ -1,12 +1,16 @@
+import argparse
+import json
 import socket
+import struct
 import threading
 import time
 from protocol import send_json, recv_json
 
 MASTER = {
     "UUID": "master-central",
+    "NAME": "master-central",
     "HOST": "0.0.0.0",
-    "PORT": 5001
+    "PORT": 5001,
 }
 
 workers = {}       # worker_id -> socket
@@ -93,6 +97,16 @@ def handle_client(conn, addr):
                     job_queue.append(data)
                 print(f"[{MASTER['UUID']}] Job externo recebido: {data['JOB_ID']}")
 
+            elif data.get("TYPE") == "ELECTION_ACK":
+                worker_id = data.get("WORKER_UUID", str(addr))
+                selected = data.get("SELECTED_MASTER", MASTER["NAME"])
+                print(f"[{MASTER['NAME']}] ELECTION_ACK de {worker_id} selecionou {selected}")
+                send_json(conn, {
+                    "TYPE": "ELECTION_ACK",
+                    "STATUS": "ACCEPTED",
+                    "MASTER_NAME": MASTER["NAME"],
+                })
+
     except Exception as e:
         print(f"[{MASTER['UUID']}] Erro em handle_client: {e}")
 
@@ -175,7 +189,57 @@ def simulate_jobs():
             time.sleep(1)
 
 
+def udp_listener():
+    """Thread que escuta DISCOVERY via UDP multicast e responde unicast ao Worker."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    group = socket.inet_aton("239.255.255.250")
+    mreq = struct.pack("4sL", group, socket.INADDR_ANY)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+
+    sock.bind(("", 5000))
+    print(f"[{MASTER['NAME']}] UDP listener ativo na porta 5000")
+
+    local_ip = socket.gethostbyname(socket.gethostname())
+
+    while True:
+        try:
+            data, addr = sock.recvfrom(4096)
+            msg = json.loads(data.decode("utf-8").strip())
+
+            if msg.get("TYPE") != "DISCOVERY":
+                continue
+
+            reply = json.dumps({
+                "TYPE": "DISCOVERY_REPLY",
+                "MASTER_NAME": MASTER["NAME"],
+                "MASTER_IP": local_ip,
+                "MASTER_PORT": MASTER["PORT"],
+                "STATUS": "AVAILABLE",
+            }) + "\n"
+
+            sock.sendto(reply.encode("utf-8"), addr)
+            print(f"[{MASTER['NAME']}] DISCOVERY_REPLY enviado para {addr}")
+        except json.JSONDecodeError:
+            print(f"[{MASTER['NAME']}] UDP: payload inválido, ignorado")
+        except Exception as e:
+            print(f"[{MASTER['NAME']}] Erro no UDP listener: {e}")
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--name", default="master-central")
+    parser.add_argument("--port", type=int, default=5001)
+    parser.add_argument("--host", default="0.0.0.0")
+    args = parser.parse_args()
+
+    MASTER["NAME"] = args.name
+    MASTER["UUID"] = args.name
+    MASTER["PORT"] = args.port
+    MASTER["HOST"] = args.host
+
+    threading.Thread(target=udp_listener, daemon=True).start()
     threading.Thread(target=start_server, daemon=True).start()
     threading.Thread(target=distribute_jobs, daemon=True).start()
     threading.Thread(target=simulate_jobs, daemon=True).start()
