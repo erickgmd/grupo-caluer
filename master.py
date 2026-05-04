@@ -201,8 +201,6 @@ def udp_listener():
     sock.bind(("", 5000))
     print(f"[{MASTER['NAME']}] UDP listener ativo na porta 5000")
 
-    local_ip = socket.gethostbyname(socket.gethostname())
-
     while True:
         try:
             data, addr = sock.recvfrom(4096)
@@ -210,6 +208,16 @@ def udp_listener():
 
             if msg.get("TYPE") != "DISCOVERY":
                 continue
+
+            # Determina o IP local que alcança o worker:
+            # - loopback: retorna o próprio loopback
+            # - rede real: usa roteamento via socket UDP
+            if addr[0].startswith("127."):
+                local_ip = "127.0.0.1"
+            else:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                    probe.connect((addr[0], 1))
+                    local_ip = probe.getsockname()[0]
 
             reply = json.dumps({
                 "TYPE": "DISCOVERY_REPLY",
