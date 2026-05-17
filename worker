@@ -1,0 +1,167 @@
+
+import socket
+import json
+import uuid
+import random
+import time
+
+MASTER_HOST = "127.0.0.1"
+MASTER_PORT = 5001
+
+WORKER_ID = str(uuid.uuid4())[:8]
+
+ORIGINAL_MASTER = ("127.0.0.1", 5001)
+
+sock = None
+
+
+def log(message):
+    print(f"[WORKER {WORKER_ID}] {message}")
+
+
+def send_json(payload):
+    global sock
+    sock.sendall((json.dumps(payload) + "\n").encode())
+
+
+def receive_json():
+    global sock
+
+    data = ""
+
+    while "\n" not in data:
+
+        chunk = sock.recv(4096).decode()
+
+        if not chunk:
+            return None
+
+        data += chunk
+
+    return json.loads(data.strip())
+
+
+def connect_master(host, port, borrowed=False):
+
+    global sock
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    sock.connect((host, port))
+
+    if borrowed:
+
+        payload = {
+            "type": "register_temporary_worker",
+            "request_id": str(uuid.uuid4()),
+            "payload": {
+                "worker_id": WORKER_ID,
+                "original_master_address": f"{ORIGINAL_MASTER[0]}:{ORIGINAL_MASTER[1]}"
+            }
+        }
+
+    else:
+
+        payload = {
+            "WORKER": "ALIVE",
+            "WORKER_UUID": WORKER_ID
+        }
+
+    send_json(payload)
+
+    log(f"Conectado ao master {host}:{port}")
+
+    work_loop()
+
+
+def process_task(user):
+
+    log(f"Processando tarefa: {user}")
+
+    time.sleep(random.randint(1, 3))
+
+    status = random.choice(["OK", "OK", "OK", "NOK"])
+
+    response = {
+        "STATUS": status,
+        "TASK": "QUERY",
+        "WORKER_UUID": WORKER_ID
+    }
+
+    send_json(response)
+
+    ack = receive_json()
+
+    log(f"ACK recebido: {ack}")
+
+
+def work_loop():
+
+    global sock
+
+    while True:
+
+        try:
+
+            message = receive_json()
+
+            if not message:
+                break
+
+            if message.get("TASK") == "NO_TASK":
+
+                log("Sem tarefas.")
+
+            elif message.get("TASK") == "QUERY":
+
+                process_task(message["USER"])
+
+            elif message.get("type") == "command_redirect":
+
+                log("Redirecionando para novo Master.")
+
+                address = message["payload"]["new_master_address"]
+
+                ip, port = address.split(":")
+
+                sock.close()
+
+                connect_master(ip, int(port), borrowed=True)
+
+                return
+
+            elif message.get("type") == "command_release":
+
+                log("Retornando ao Master original.")
+
+                sock.close()
+
+                connect_master(
+                    ORIGINAL_MASTER[0],
+                    ORIGINAL_MASTER[1],
+                    borrowed=False
+                )
+
+                return
+
+        except Exception as e:
+
+            log(e)
+
+            try:
+                sock.close()
+            except:
+                pass
+
+            time.sleep(3)
+
+            connect_master(
+                ORIGINAL_MASTER[0],
+                ORIGINAL_MASTER[1],
+                borrowed=False
+            )
+
+            return
+
+
+connect_master(MASTER_HOST, MASTER_PORT)
